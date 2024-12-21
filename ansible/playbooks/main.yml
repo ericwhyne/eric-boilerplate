@@ -1,0 +1,168 @@
+---
+- name: Install Nginx, Flask, and setup Lets Encrypt Certs
+  hosts: "{{ server_dns }}"
+  become: yes
+  vars:
+    flask_app_dir: /var/www/flask_app
+    nginx_conf_dir: /etc/nginx/sites-available
+    nginx_conf_file: default
+    letsencrypt_email: [enter a valid email here]
+
+  tasks:
+    - name: Update apt package manager
+      tags:
+        - install
+      apt:
+        update_cache: yes
+      register: update_apt
+      until: update_apt is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Install required packages (nginx, python3, pip)
+      tags:
+        - install
+      apt:
+        name:
+          - nginx
+          - python3
+          - python3-pip
+        state: present
+      register: install_packages
+      until: install_packages is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Ensure nginx is running
+      tags:
+        - install
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Create Flask application directory
+      tags:
+        - install
+      file:
+        path: "{{ flask_app_dir }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Install Flask
+      tags:
+        - install
+      apt:
+        name: python3-flask
+        state: present
+
+    - name: Copy Flask app
+      tags:
+        - install
+        - deploy
+      copy:
+        content: |
+          from flask import Flask
+          app = Flask(__name__)
+
+          @app.route('/')
+          def hello():
+              return 'Hello, World boilerplate v1!'
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=5000)
+        dest: "{{ flask_app_dir }}/app.py"
+        mode: '0644'
+      notify: Restart Flask
+
+    - name: Install Gunicorn for Flask
+      tags:
+        - install
+      apt:
+        name: gunicorn
+        state: present
+      register: install_gunicorn
+      until: install_gunicorn is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Setup Gunicorn systemd service
+      tags:
+        - install
+      template:
+        src: ../templates/gunicorn.service.j2
+        dest: /etc/systemd/system/gunicorn.service
+        mode: '0644'
+      notify:
+        - Reload Systemd
+        - Restart Gunicorn
+
+    - name: Ensure Gunicorn is running
+      tags:
+        - install
+      systemd:
+        name: gunicorn
+        state: started
+        enabled: yes
+
+    - name: Configure Nginx
+      tags:
+        - install
+      template:
+        src: ../templates/nginx.conf.j2
+        dest: "{{ nginx_conf_dir }}/{{ nginx_conf_file }}"
+        mode: '0644'
+      notify: Reload Nginx
+
+    - name: Install Certbot
+      tags:
+        - install
+      apt:
+        name: certbot
+        state: present
+      register: install_certbot
+      until: install_certbot is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Install Certbot Nginx plugin
+      tags:
+        - install
+      apt:
+        name: python3-certbot-nginx
+        state: present
+      register: install_certbot_nginx
+      until: install_certbot_nginx is succeeded
+      retries: 3
+      delay: 5
+
+    - name: Obtain SSL certificate
+      tags:
+        - install
+      command: certbot --nginx --non-interactive --agree-tos --email {{ letsencrypt_email }} -d {{ server_dns }}
+      register: certbot_result
+      until: certbot_result is succeeded
+      retries: 3
+      delay: 5
+
+  handlers:
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Reload Systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart Gunicorn
+      systemd:
+        name: gunicorn
+        state: restarted
+
+    - name: Restart Flask
+      systemd:
+        name: gunicorn
+        state: restarted
